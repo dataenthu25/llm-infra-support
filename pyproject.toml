@@ -1,0 +1,27 @@
+[project]
+name = "opspilot"
+version = "0.1.0"
+description = "Search ops runbooks and postmortems with embeddings stored in pgvector"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "sentence-transformers>=3.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.54.0",
+    "openai>=3.19.2",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+opspilot-ingest = "opspilot.ingest:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
