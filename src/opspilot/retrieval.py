@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import numpy as np
 import psycopg
 from sentence_transformers import SentenceTransformer
 
@@ -26,12 +27,19 @@ class RetrievedChunk:
     distance: float
 
 
+def embed_question(model: SentenceTransformer, question: str) -> np.ndarray:
+    return model.encode(QUERY_PREFIX + question, normalize_embeddings=True, show_progress_bar=False)
+
+
+def search(conn: psycopg.Connection, query_embedding: np.ndarray, k: int) -> list[RetrievedChunk]:
+    """Return the k chunks closest to the embedding, closest first."""
+    rows = conn.execute(SEARCH_SQL, {"query": query_embedding, "k": k}).fetchall()
+    return [RetrievedChunk(*row) for row in rows]
+
+
 def retrieve(
     conn: psycopg.Connection, model: SentenceTransformer, question: str, k: int
 ) -> list[RetrievedChunk]:
     """Return the k chunks closest to the question, closest first."""
-    query_embedding = model.encode(
-        QUERY_PREFIX + question, normalize_embeddings=True, show_progress_bar=False
-    )
-    rows = conn.execute(SEARCH_SQL, {"query": query_embedding, "k": k}).fetchall()
-    return [RetrievedChunk(*row) for row in rows]
+    # The API calls the two steps separately so it can trace each one.
+    return search(conn, embed_question(model, question), k)

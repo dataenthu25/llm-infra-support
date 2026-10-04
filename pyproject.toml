@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn>=0.54.0",
     "openai>=3.19.2",
     "python-dotenv>=1.2.3",
+    "langfuse>=4.16",
 ]
 
 [project.scripts]
