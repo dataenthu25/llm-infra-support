@@ -25,8 +25,51 @@ curl -s -X POST localhost:8000/ask -H 'content-type: application/json' \
 
 uv run python scripts/search.py "question"    # retrieval only, top 3 chunks with distances
 uv run python scripts/benchmark.py            # fixed question set -> results table below
-uv run pytest                                 # chunking tests
+uv run pytest                                 # chunking and tracing tests
 ```
+
+## Tracing (optional)
+
+Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env` and every `POST /ask` sends a
+trace to [Langfuse](https://langfuse.com). Without them the app runs exactly as before.
+
+To run Langfuse locally (needs ~4 GB of RAM for Docker):
+
+```bash
+cp langfuse/.env.example langfuse/.env   # replace every CHANGEME (openssl rand -hex 32)
+cd langfuse && docker compose up -d      # UI at http://localhost:3000 after ~2-3 minutes
+# in the project root .env: LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY =
+#   LANGFUSE_INIT_PROJECT_PUBLIC_KEY / _SECRET_KEY from langfuse/.env
+```
+
+`langfuse/docker-compose.yml` is Langfuse's official self-hosting file. It is kept in its own
+folder so it reads `langfuse/.env`, not opspilot's `.env` (both define `DATABASE_URL`).
+`LANGFUSE_INIT_*` creates the org, project, login and API keys on first start.
+
+| Service | What it does |
+|---|---|
+| `langfuse-web` (:3000) | UI and API. Receives traces from the SDK, stores the raw events in MinIO and queues them in Redis. |
+| `langfuse-worker` | Takes queued events and writes traces into ClickHouse. Also runs evaluations and exports. |
+| `postgres` | Users, projects, API keys, prompts, settings. Separate from opspilot's pgvector database. |
+| `clickhouse` | Traces, observations and scores; serves the dashboards and filters. |
+| `redis` | Queue between web and worker, plus cache. |
+| `minio` (:9090) | S3-compatible storage for raw events, media and exports. |
+
+Each trace is named `ask`, comes from service `opspilot` (`resourceAttributes.service.name`),
+is tagged `model:<LLM_MODEL>` and `threshold:<DISTANCE_THRESHOLD>`, and contains:
+
+- `embed-question` (embedding): the question and the embedding model.
+- `vector-search` (retriever): source, section and distance of each returned chunk.
+- `llm` (generation): model, temperature, full prompt, answer, input/output tokens.
+- or, when the distance threshold refuses the question, a `refused` event with the closest
+  distance and the near misses, and the trace is also tagged `refused` (filter on it to tune
+  the threshold).
+
+Langfuse can never break or slow down `/ask`: spans are queued in memory and sent by a
+background thread, so an unreachable Langfuse only logs export errors (a request added
+no measurable time in `tests/test_tracing.py`). The queue holds 2048 spans and drops the
+rest. On shutdown, queued traces are flushed, but for at most 5 s, so a Langfuse outage
+can't hold up a deploy.
 
 ## Architecture
 
@@ -57,8 +100,10 @@ Question answering (POST /ask)
   off-topic questions before they cost an LLM call. The prompt makes the model answer in
   bullets, end each bullet with `[source-file.md]`, and add a "Not covered by the runbooks"
   bullet for any part of the question the context doesn't answer.
-- **Config** (`config.py`, `.env`): database URL, LLM endpoint/model, `TOP_K` and
-  `DISTANCE_THRESHOLD`.
+- **Config** (`config.py`, `.env`): database URL, LLM endpoint/model, `TOP_K`,
+  `DISTANCE_THRESHOLD` and the optional Langfuse keys.
+- **Tracing** (`tracing.py`): creates the Langfuse client (or a disabled one) and flushes it
+  on shutdown with a time limit.
 
 ## Results
 

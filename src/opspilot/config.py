@@ -34,3 +34,10 @@ DISTANCE_THRESHOLD = float(os.environ.get("DISTANCE_THRESHOLD", "0.45"))
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:7b")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "ollama")  # Ollama ignores it, but the client requires one
+
+# Tracing (optional): set both keys to send a trace per /ask request to Langfuse.
+# Leave them empty to run without tracing. See langfuse/docker-compose.yml for a local server.
+LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000")
+TRACING_ENABLED = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)

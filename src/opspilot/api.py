@@ -10,12 +10,14 @@ from contextlib import asynccontextmanager
 
 import openai
 from fastapi import FastAPI, HTTPException
+from langfuse import propagate_attributes
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 from opspilot import config
 from opspilot.db import connect
-from opspilot.retrieval import RetrievedChunk, retrieve
+from opspilot.retrieval import RetrievedChunk, embed_question, search
+from opspilot.tracing import create_langfuse, shutdown_langfuse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("opspilot.api")
@@ -65,12 +67,15 @@ resources: dict = {}
 def load_resources() -> None:
     resources["embedder"] = SentenceTransformer(config.EMBEDDING_MODEL)
     resources["llm"] = openai.OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+    resources["langfuse"] = create_langfuse()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_resources()
     yield  # the app serves requests while we're paused here
+    # Send the traces still queued in memory. Gives up after 5 s if Langfuse is down.
+    shutdown_langfuse(resources["langfuse"])
     resources.clear()
 
 
@@ -88,14 +93,45 @@ def elapsed_ms(start: float) -> int:
     return round((time.perf_counter() - start) * 1000)
 
 
+def source_list(chunks: list[RetrievedChunk]) -> list[dict]:
+    return [{"source": c.source, "section": c.section, "distance": round(c.distance, 4)} for c in chunks]
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> AskResponse:
     # Plain `def` (not `async def`): FastAPI runs it in a worker thread, so the blocking
     # embedding, database and LLM calls don't freeze the server for other requests.
+    langfuse = resources["langfuse"]
+    # One trace per request: this root span is the trace, each step below is a child observation.
+    # The tags are set on every observation in the trace, so traces can be filtered by them.
+    with (
+        langfuse.start_as_current_observation(name="ask", input={"question": request.question}) as root,
+        propagate_attributes(
+            trace_name="ask",
+            tags=[f"model:{config.LLM_MODEL}", f"threshold:{config.DISTANCE_THRESHOLD}"],
+        ),
+    ):
+        response = answer_question(request.question)
+        root.update(output={"answer": response.answer, "sources": [s.source for s in response.sources]})
+    return response
+
+
+def answer_question(question: str) -> AskResponse:
+    langfuse = resources["langfuse"]
     start = time.perf_counter()
 
-    with connect() as conn:
-        chunks = retrieve(conn, resources["embedder"], request.question, config.TOP_K)
+    with langfuse.start_as_current_observation(
+        name="embed-question", as_type="embedding", model=config.EMBEDDING_MODEL, input=question
+    ) as span:
+        query_embedding = embed_question(resources["embedder"], question)
+        span.update(output={"dimensions": len(query_embedding)})
+
+    with langfuse.start_as_current_observation(
+        name="vector-search", as_type="retriever", input={"top_k": config.TOP_K}
+    ) as span:
+        with connect() as conn:
+            chunks = search(conn, query_embedding, config.TOP_K)
+        span.update(output=source_list(chunks))
     retrieval_ms = elapsed_ms(start)
 
     # Guardrail: if even the closest chunk is too far away, don't call the LLM.
@@ -104,8 +140,18 @@ def ask(request: AskRequest) -> AskResponse:
         near_misses = "; ".join(f"{c.source} > {c.section} ({c.distance:.3f})" for c in chunks)
         logger.info(
             "No runbook within distance %.2f for %r. Near misses: %s",
-            config.DISTANCE_THRESHOLD, request.question, near_misses or "none",
+            config.DISTANCE_THRESHOLD, question, near_misses or "none",
         )
+        # Adds "refused" to the trace's tags (merged with the model/threshold tags).
+        with propagate_attributes(tags=["refused"]):
+            langfuse.create_event(
+                name="refused",
+                metadata={
+                    "threshold": config.DISTANCE_THRESHOLD,
+                    "closest_distance": round(chunks[0].distance, 4) if chunks else None,
+                    "near_misses": source_list(chunks),
+                },
+            )
         return AskResponse(
             answer=NO_RUNBOOK_ANSWER,
             sources=[],
@@ -117,33 +163,54 @@ def ask(request: AskRequest) -> AskResponse:
             output_tokens=0,
         )
 
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": build_user_prompt(question, chunks)},
+    ]
+    temperature = 0  # we want the most likely, factual answer, not creativity
     generation_start = time.perf_counter()
-    try:
-        completion = resources["llm"].chat.completions.create(
-            model=config.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(request.question, chunks)},
-            ],
-            temperature=0,  # we want the most likely, factual answer, not creativity
-        )
-    except openai.APIConnectionError:
-        raise HTTPException(503, f"Cannot reach the LLM at {config.LLM_BASE_URL}. Is it running?")
-    except openai.APIStatusError as e:
-        raise HTTPException(502, f"LLM error ({e.status_code}): {e.message}")
-    generation_ms = elapsed_ms(generation_start)
+    with langfuse.start_as_current_observation(
+        name="llm",
+        as_type="generation",
+        model=config.LLM_MODEL,
+        model_parameters={"temperature": temperature},
+        input=messages,
+    ) as generation:
+        try:
+            completion = resources["llm"].chat.completions.create(
+                model=config.LLM_MODEL, messages=messages, temperature=temperature
+            )
+        except openai.APIConnectionError:
+            message = f"Cannot reach the LLM at {config.LLM_BASE_URL}. Is it running?"
+            generation.update(level="ERROR", status_message=message)
+            raise HTTPException(503, message)
+        except openai.APIStatusError as e:
+            message = f"LLM error ({e.status_code}): {e.message}"
+            generation.update(level="ERROR", status_message=message)
+            raise HTTPException(502, message)
+        generation_ms = elapsed_ms(generation_start)
 
-    usage = completion.usage
+        answer = completion.choices[0].message.content or ""
+        usage = completion.usage
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        model = completion.model or config.LLM_MODEL
+        generation.update(
+            model=model,
+            output=answer,
+            usage_details={"input": input_tokens, "output": output_tokens},
+        )
+
     return AskResponse(
-        answer=completion.choices[0].message.content or "",
+        answer=answer,
         sources=[
             Source(source=c.source, section=c.section, distance=round(c.distance, 4))
             for c in chunks
         ],
-        model=completion.model or config.LLM_MODEL,
+        model=model,
         retrieval_ms=retrieval_ms,
         generation_ms=generation_ms,
         latency_ms=elapsed_ms(start),
-        input_tokens=usage.prompt_tokens if usage else 0,
-        output_tokens=usage.completion_tokens if usage else 0,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
