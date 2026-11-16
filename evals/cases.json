@@ -1,0 +1,14 @@
+[
+  {"id": "pg-replica-lag", "question": "Our postgres replica is 5 minutes behind. What should I check?", "expected_sources": ["db-postgres-replication-lag.md"]},
+  {"id": "pg-too-many-conns", "question": "Apps fail with 'too many clients already' from Postgres", "expected_sources": ["db-postgres-connection-exhaustion.md"]},
+  {"id": "pg-disk", "question": "Database volume is at 95%, what can I clean up safely?", "expected_sources": ["db-postgres-disk-full.md"]},
+  {"id": "redis-full", "question": "The Redis sessions cluster is full. How do I fix it?", "expected_sources": ["db-redis-memory-eviction.md"]},
+  {"id": "k8s-oom", "question": "Pods keep getting OOMKilled after a deploy. What do I do?", "expected_sources": ["k8s-oomkilled-pods.md"]},
+  {"id": "k8s-crashloop", "question": "My pod restarts every few seconds and shows CrashLoopBackOff", "expected_sources": ["k8s-crashloopbackoff.md"]},
+  {"id": "k8s-hpa", "question": "CPU is high but the autoscaler is not adding replicas", "expected_sources": ["k8s-hpa-not-scaling.md"]},
+  {"id": "lb-502", "question": "Clients get 502 errors from the load balancer during deploys. Why?", "expected_sources": ["net-load-balancer-5xx.md"]},
+  {"id": "vpn-hang", "question": "Small requests work but large uploads hang over the VPN. What's wrong?", "expected_sources": ["postmortem-2025-07-30-vpn-mtu-mismatch.md", "net-packet-loss-latency.md"]},
+  {"id": "cert-expired", "question": "Browsers say our public site certificate is expired", "expected_sources": ["postmortem-2025-06-02-ingress-cert-expiry.md", "net-tls-handshake-failures.md"]},
+  {"id": "offtopic-person", "question": "Who is Donald Trump?", "should_refuse": true},
+  {"id": "offtopic-recipe", "question": "Give me a recipe for pancakes", "should_refuse": true}
+]
