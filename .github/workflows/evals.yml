@@ -1,0 +1,36 @@
+name: evals
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  retrieval-eval:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: opspilot
+          POSTGRES_PASSWORD: opspilot
+          POSTGRES_DB: opspilot
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U opspilot -d opspilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies (must match uv.lock)
+        run: uv sync --locked
+      - name: Unit tests
+        run: uv run pytest
+      - name: Ingest runbooks into pgvector
+        run: uv run opspilot-ingest
+      - name: Retrieval eval (fails the build on regressions)
+        run: uv run python evals/retrieval_eval.py
